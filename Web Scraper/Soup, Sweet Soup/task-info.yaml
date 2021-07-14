@@ -1,0 +1,447 @@
+type: edu
+files:
+- name: scraper.py
+  visible: true
+  text: |
+    import requests
+    import json
+
+    from bs4 import BeautifulSoup
+
+
+    print("Input the URL:")
+    url = input()
+
+    try:
+        r = requests.get(url, headers={'Accept-Language': 'en-US, en;q=0.5'})
+        if r.status_code != 200:
+            print("Invalid movie page!")
+        elif not url.startswith('https://www.imdb.com/title/'):
+            print("Invalid movie page!")
+        else:
+            soup = BeautifulSoup(r.content, 'html.parser')
+
+            script = soup.find_all('script', {'type': 'application/ld+json'})
+            dictionary = json.loads(script[0].contents[0])
+            output = {'title': dictionary['name']}
+
+            other_script = soup.find_all('div', {'class': 'summary_text'})
+
+            output['description'] = other_script[0].text.lstrip().rstrip()
+
+            print(output)
+
+    except ConnectionError:
+        print("Invalid movie page!")
+  learner_created: false
+- name: tests.py
+  visible: false
+  text: |
+    import glob
+    import os
+    import random
+    import re
+    import shutil
+    import string
+
+    import requests
+    from bs4 import BeautifulSoup
+    from furl import furl
+    from hstest import *
+
+
+    class NatureScraper:
+        def tag_leading_to_view_article(self, tag):
+            return tag.has_attr("data-track-action") and tag["data-track-action"] == "view article"
+
+        def tag_containing_atricle_type(self, tag):
+            return tag.name == "span" and tag.has_attr("data-test") and tag["data-test"] == "article.type"
+
+        def tag_containing_article_title(self, tag):
+            return tag.name == "h1" and ("article" in tag["class"][0] and "title" in tag["class"][0])
+
+        def tag_containing_article_body(self, tag):
+            return tag.name == "div" and ("article" in tag.get("class", [""])[0] and "body" in tag.get("class", [""])[0])
+
+        def get_article_links_of_type(self, url, article_type="News"):
+            origin_url = furl(url).origin
+            try:
+                articles_resp = requests.get(url)
+            except Exception:
+                raise WrongAnswer(f"ConnectionError occurred when tests tried to reach the page \'{url}\'.\n"
+                                  f"Please try running tests again.")
+            soup = BeautifulSoup(articles_resp.text, "html.parser")
+            articles = soup.find_all(self.tag_containing_atricle_type)
+            articles = list(filter(lambda x: x.text.strip() == article_type, articles))
+            return [
+                furl(origin_url).add(path=x.find_parent("article").find(self.tag_leading_to_view_article).get("href")).url \
+                for x in articles]
+
+        def get_article_title_and_content(self, url):
+            try:
+                article = requests.get(url)
+            except Exception:
+                return CheckResult.wrong("An error occurred when tests tried to connect to the Internet page.\n"
+                                         "Please, try again.")
+            soup = BeautifulSoup(article.text, "html.parser")
+            title = soup.find(self.tag_containing_article_title)
+            content = soup.find(self.tag_containing_article_body)
+            if title and content:
+                return title.text.strip(), content.text.strip()
+
+
+    class WebScraperTest(StageTest):
+        def generate(self):
+            for name in os.listdir():
+                if os.path.isdir(name) and name.startswith("Page_"):
+                    shutil.rmtree(name)
+
+            return [TestCase(stdin="3\nResearch Highlight", attach=(3, "Research Highlight"), time_limit=0),
+                    TestCase(stdin="1\nNews & Views", attach=(1, "News & Views"), time_limit=0),
+                    TestCase(stdin="2\nNews Feature", attach=(2, "News Feature"), time_limit=0)]
+
+        def check(self, reply, attach=None):
+            n_pages, article_type = attach
+            scraper = NatureScraper()
+            for i in range(1, n_pages + 1):
+                dirname = f"Page_{i}"
+                dirname = os.path.abspath(dirname)
+                if not os.path.exists(dirname):
+                    return CheckResult.wrong(f"Impossible to find directory {dirname}")
+                os.chdir(dirname)
+                txt_files = glob.glob("*.txt")
+                url = furl("https://www.nature.com/nature/articles").add({"page": str(i)})
+                article_links = scraper.get_article_links_of_type(url, article_type=article_type)
+                if len(txt_files) != len(article_links):
+                    return CheckResult.wrong("A wrong number of files with articles was found in the directory {0}. \n"
+                                             "{1} files were found, {2} files were expected.".format(dirname,
+                                                                                                     len(txt_files),
+                                                                                                     len(article_links)))
+                if article_links:
+                    random_val = random.randint(0, len(article_links) - 1)
+                    title, content = scraper.get_article_title_and_content(article_links[random_val])
+                    content = content.strip()
+                    title = f"{title.translate(str.maketrans('', '', string.punctuation)).replace(' ', '_')}.txt"
+                    title = os.path.abspath(title)
+                    if not os.path.exists(title):
+                        return CheckResult.wrong("A file with the title {0} was expected, but was not found.".format(title))
+                    with open(title, "rb") as f:
+                        try:
+                            file_content = f.read().decode('utf-8').strip()
+                        except UnicodeDecodeError:
+                            return CheckResult.wrong("An error occurred when tests tried to read the file \"{0}\"\n"
+                                                     "Please, make sure you save your file in binary format \n"
+                                                     "and encode the saved data using utf-8 encoding.".format(title))
+
+                    file_content = re.sub('[\r\n]', '', file_content)
+                    content = re.sub('[\r\n]', '', content)
+                    if file_content != content:
+                        return CheckResult.wrong("Some of the files do not contain the expected article's body. \n"
+                                                 "The tests expected the following article:\n"
+                                                 f"\"{content}\"\n"
+                                                 f"However, the following text was found in the file {title}:\n"
+                                                 f"\"{file_content}\"")
+                os.chdir("..")
+                try:
+                    shutil.rmtree(dirname)
+                except OSError as e:
+                    print(f"The following error occurred when the tests tried to remove directory {dirname}:\n"
+                          f"{e}\n"
+                          f"If you can, please, make it possible to remove the directory.")
+            return CheckResult.correct()
+
+
+    if __name__ == '__main__':
+        WebScraperTest().run_tests()
+  learner_created: false
+- name: source.html
+  visible: true
+  text: |
+    <html>
+    <head>
+      <title>warming up</title>
+      <link rel="stylesheet" type="text/css" href="../style.css">
+    </head>
+    <body>
+    <center>
+    <img src="calc.jpg"><br>
+    <font color="gold">
+    <p>Hint: try to change the URL address.
+    </body>
+    </html>
+  learner_created: true
+- name: Quarterdose_of_Moderna_COVID_vaccine_still_rouses_a_big_immune_response.txt
+  visible: true
+  text: |-
+    Workers prepare doses of Moderna’s COVID-19 vaccine.Credit: Eugene Hoshiko/AP/Shutterstock
+
+
+    A little bit of coronavirus vaccine goes a long way towards generating lasting immunity. Two jabs that each contained only one-quarter of the standard dose of the Moderna COVID-19 vaccine gave rise to long-lasting protective antibodies and virus-fighting T cells, according to tests in nearly three dozen people1. The results hint at the possibility of administering fractional doses to stretch limited vaccine supplies and accelerate the global immunization effort.Since 2016, such a dose-reduction strategy has successfully vaccinated millions of people in Africa and South America against yellow fever2. But no similar approach has been tried in response to COVID-19, despite vaccine shortages in much of the global south.“There’s a huge status quo bias, and it’s killing people,” says Alex Tabarrok, an economist at George Mason University in Fairfax, Virginia. “Had we done this starting in January, we could have vaccinated tens, perhaps hundreds, of millions more people.”The just-right dose?In the earliest trial of Moderna’s mRNA-based vaccine, study participants received one of three dose levels: 25, 100 or 250 micrograms3. The top dose proved too toxic. The low dose elicited the weakest immune response. The middle dose seemed to offer the best balance: it triggered strong immunity and had acceptable side effects.That 100-microgram dose ultimately became the one authorized for mass use in dozens of countries. But Moderna scientists later showed that a half-dose seemed to be just as good as the standard dose at stimulating immune protection4.To find out whether a low dose might offer protection, scientists analysed blood from 35 participants in the original trial. Each had received two 25-microgram jabs of vaccine 28 days apart.Six months after the second shot, nearly all of the 35 participants had ‘neutralizing’ antibodies, which block the virus from infecting cells, the researchers reported in a preprint published on 5 July1. Participants’ blood also contained an armada of different T cells, both ‘killer’ cells that can destroy infected cells and a variety of ‘helper’ cells that aid in general immune defence.
+
+    Had COVID? You’ll probably make antibodies for a lifetime
+    Levels of both antibodies and T cells were comparable to those found in people who have recovered from COVID-19.“It is quite remarkable — and quite promising — that you can easily detect responses for that long a time,” says Daniela Weiskopf, an immunologist at the La Jolla Institute for Immunology (LJI) in California and a co-author of the study, which has not yet been peer reviewed.Corine Geurts van Kessel, a clinical virologist at the Erasmus University Medical Center in Rotterdam, the Netherlands, who was not involved in the study, agrees. “It’s rather good news,” she says. “Even with a low dose, you can prime your own immune system in quite a nice way.”Weiskopf and her study co-author Shane Crotty, also at the LJI, are among the scientists who would prefer carefully planned trials to confirm the efficacy of reduced vaccine doses before any such regimen is widely deployed. One such trial is ongoing: a study in Belgium is comparing a lower-dose version of the vaccine from Pfizer–BioNTech against the standard dose.But Sarah Cobey, an infectious-disease researcher at the University of Chicago in Illinois and a co-author of a 5 July Nature Medicine commentary5 supporting dose ‘fractionation’, disagrees about the need for time-consuming data collection.“We shouldn’t wait that long,” she says. “People are dying, and we have historical precedent for making very well-reasoned guesses that we think are going to save lives.”Less is moreEven if the immune responses spurred by the low-dose strategy are only moderately effective at keeping SARS-CoV-2 at bay, it could still be worth giving quarter doses to speed up the pace of vaccination around the world, argues Tabarrok.According to a modelling study published by Tabarrok and other economists, such an approach would reduce infections and COVID-19-linked deaths more than current policies6. The study has not yet been peer reviewed.A half-dose now is more useful to an unvaccinated person than a full dose a year from now, Tabarrok says, which means that dose-stretching “is a way of promoting vaccine equity.”
+  learner_created: true
+- name: The_rise_of_‘ARPAeverything’_and_what_it_means_for_science.txt
+  visible: true
+  text: "Funding from ARPA-Energy has led to the creation of companies such as solar\
+    \ manufacturing firm 1366 Technologies (now CubicPV). Here, a technician shows\
+    \ off a solar cell at a demonstration plant in 2013.Credit: Pat Greenhouse/The\
+    \ Boston Globe/Getty\n\n\nUS President Joe Biden’s administration wants to create\
+    \ a US$6.5-billion agency to accelerate innovations in health and medicine — and\
+    \ revealed new details about the unit last month1. Dubbed ARPA-Health (ARPA-H),\
+    \ it is the latest in a line of global science agencies now being modelled on\
+    \ the renowned US Defense Advanced Research Projects Agency (DARPA), whose work\
+    \ a generation ago laid the foundation for the modern Internet.With more DARPA\
+    \ clones on the horizon, researchers warn that success in replicating DARPA’s\
+    \ hands-on, high-risk, high-reward approach is by no means assured.“The ARPA model\
+    \ has been successful, and we’ve learned a lot,” says Laura Diaz Anadon, who heads\
+    \ the Cambridge Centre for Environment, Energy and Natural Resource Governance\
+    \ at the University of Cambridge, UK. “But ARPA is not a magic bullet that will\
+    \ apply to everything.”\n\nPlan to create UK version of DARPA lacks detail, say\
+    \ researchers\nEnamoured with the innovation that DARPA fostered in the United\
+    \ States, governments around the world, including in Europe and Japan, have attempted\
+    \ to duplicate the agency within their own borders. Most recently, the United\
+    \ Kingdom announced plans to create its version, the Advanced Research and Invention\
+    \ Agency (ARIA), with an initial allocation of £800 million (US$1.1 billion).\
+    \ And the Biden administration has proposed launching a second US agency, the\
+    \ $500-million ARPA-Climate (ARPA-C), to spur technologies for fighting climate\
+    \ change.Scientists who have studied the DARPA model say it works if applied properly,\
+    \ and to the right, ‘ARPA-able’ problems. But replicating DARPA’s recipe isn’\
+    t easy. It requires the managers who build and run an agency’s grant programmes\
+    \ to have the freedom to assemble research teams and pursue risky ideas in promising\
+    \ fields that have typically been neglected by conventional industrial research\
+    \ and development programmes. Critics aren’t yet sure how ARPA-H, ARPA-C and ARIA\
+    \ will fare.Following the recipeThe US Department of Defense established DARPA\
+    \ in 1958, one year after the Soviet Union launched the world’s first satellite,\
+    \ Sputnik 1. The goal was to avoid falling behind the Soviets, and to ensure that\
+    \ the United States remained a world leader in technology. DARPA was instrumental\
+    \ in early computing research, as well as in developing technologies such as GPS\
+    \ and unmanned aerial vehicles (See ‘Following in DARPA’s footsteps’). DARPA functions\
+    \ differently from other major US science funding agencies, and has a leaner budget\
+    \ ($3.5 billion). Its roughly 100 programme managers, borrowed for stints of 3–\
+    5 years from academia or industry, have broad latitude in what they fund, and\
+    \ actively engage with their teams, enforcing aggressive deadlines and monitoring\
+    \ progress along the way. By comparison, projects funded by agencies such as the\
+    \ US National Institutes of Health (NIH) typically see little engagement between\
+    \ programme managers and the researchers they fund, beyond annual progress reports.\
+    \ Projects funded by these agencies also tend towards being those that are likely\
+    \ to succeed — and thus typically represent more incremental advances, says William\
+    \ Bonvillian, a policy researcher at the Massachusetts Institute of Technology\
+    \ in Cambridge who has studied DARPA.\nFollowing in DARPA’s footsteps\n\nBeginning\
+    \ in the early 2000s, the United States and other nations began launching agencies\
+    \ that aimed to capture the magic of the US Defense Advanced Research Projects\
+    \ Agency (DARPA).\n1958: The United States establishes what will eventually become\
+    \ DARPA, which initially focuses on space, missile defence and the detection of\
+    \ nuclear weapons.\n1963: A DARPA project successfully launches the first of several\
+    \ Transit satellites, giving US Navy ships accurate location readings and laying\
+    \ the groundwork for the future GPS.\n1966: DARPA initiates the ARPANET project\
+    \ in an effort to remotely and securely link computers. Years later, this effort\
+    \ gives rise to the Internet.\n1988: A joint project between DARPA and the US\
+    \ Navy produces the first long-range, unmanned aerial vehicle, Amber, which flew\
+    \ non-stop for more than 38 hours.\n2002: US Congress establishes the first DARPA\
+    \ clone, the Homeland Security ARPA.\n2007: Former US president George W. Bush\
+    \ signs the America COMPETES Act, which authorizes the creation of ARPA-Energy\
+    \ (ARPA-E), with the aim of developing low-carbon technologies. Two years later,\
+    \ former president Barack Obama formally launches the agency.\n2013: DARPA awards\
+    \ the first grants to firms such as Moderna in Cambridge, Massachusetts, and Pfizer\
+    \ in New York City to support the development of messenger RNA vaccines, helping\
+    \ to lay the groundwork for the jabs deployed to fight the COVID-19 pandemic.\n\
+    2018: Japan launches its largest DARPA-inspired programme, Moonshot, with an initial\
+    \ budget of ¥100 billion (US$911 million) over five years. \n2019: Germany launches\
+    \ the Federal Agency for Disruptive Innovation (SPRIN-D) with a budget of around\
+    \ €1 billion (US$1.2 billion) over 10 years.\n2020: The United Kingdom announces\
+    \ plans to launch the Advanced Research and Invention Agency (ARIA), which will\
+    \ receive £800 million (US$1.1 billion) to cover its first few years. \n2021:\
+    \ US President Joe Biden calls for the creation of ARPA-Health and ARPA-Climate\
+    \ in his first budget outline.\n\n\nThe DARPA model doesn’t work if programme\
+    \ managers aren’t given the space to fail, says Bonvillian. When the US government\
+    \ applied the model to developing national-defence technologies through the Homeland\
+    \ Security ARPA in 2002, he adds, this was the problem. The effort eventually\
+    \ collapsed. “If you don’t get the culture right on day one, you have got a problem,”\
+    \ says Bonvillian.Researchers also point out that a successful ARPA needs a customer\
+    \ for the technologies it develops. In the case of DARPA, the US military was\
+    \ ready to purchase many promising inventions. ARPA-Energy (ARPA-E), which was\
+    \ launched in 2009 under former president Barack Obama to advance low-carbon energy\
+    \ technologies, addressed this challenge by helping grant recipients to develop\
+    \ plans for commercialization from the outset — a model that Bonvillian says DARPA\
+    \ has also now imported.ARPA-E had the independence it needed to function well,\
+    \ researchers say. Still running today, the agency, housed within the US Department\
+    \ of Energy (DoE), has invested $2.8 billion in nearly 1,200 projects, which have\
+    \ attracted another $5.4 billion in private-sector investments and led to the\
+    \ creation of 92 companies. Last month, one of those companies, 1366 Technologies\
+    \ in Bedford, Massachusetts, announced plans to build a $300-million facility\
+    \ for manufacturing solar cells in India. The company, now known as CubicPV, received\
+    \ $4 million from ARPA-E in 2009 to develop a cleaner, faster, cheaper way to\
+    \ manufacture the silicon semiconductors that go into solar panels.\n\nBiden pursues\
+    \ giant boost for science spending\nBecause it can take decades for new technologies\
+    \ to have commercial and societal impact, whether ARPA-E will transform the energy\
+    \ industry remains to be seen. But scientists have documented preliminary signs\
+    \ of its success2,3, as measured by patenting, publishing and, in some cases,\
+    \ attracting venture capital for technologies originally funded by the agency.\
+    \ “The answer is yes, the [ARPA] model works, or at least it did in this case,”\
+    \ says Anna Goldstein, an energy researcher at the University of Massachusetts\
+    \ Amherst who has analysed ARPA-E’s worth. But that does not mean the model will\
+    \ solve all problems, she warns.The new generationResearchers have responded to\
+    \ Biden’s latest ARPA proposals with trepidation. Some scientists have questioned\
+    \ the need to create ARPA-C, rather than expanding ARPA-E. They point out that\
+    \ the two have similar missions, even though DoE secretary Jennifer Granholm has\
+    \ said they will not overlap. As planned, ARPA-C would seek to foster “game-changing”\
+    \ energy and climate solutions, including technologies such as small, modular\
+    \ nuclear reactors and low-energy buildings — innovations that also fall under\
+    \ ARPA-E’s purview.Questions also abound about ARPA-H. The Biden administration\
+    \ proposed that it should be housed within the NIH, which critics worry could\
+    \ stifle innovation.In a guest editorial published in Science last month1, NIH\
+    \ director Francis Collins and other administration officials acknowledged that\
+    \ the NIH tends to fund incremental research rather than bold new technologies\
+    \ that could transform the marketplace, and agreed that ARPA-H’s organization\
+    \ should be “flat, lean, and nimble”, with a culture that values “bold goals with\
+    \ big potential impact”. They cited potential breakthroughs in everything from\
+    \ vaccine development, to drug-delivery systems, to wearable medical devices.\n\
+    \n\n\n\n\n\nDARPA investments have led to the creation of technologies such as\
+    \ unmanned aerial vehicles.Credit: US Air Force Photo/Alamy\n\n\nThe Biden administration\
+    \ is saying all the right things, says Bonvillian, although he still worries about\
+    \ whether ARPA-H will have the independence and the authority that it needs to\
+    \ operate within the biomedical-research mammoth. He also says the NIH will need\
+    \ to embrace the kind of interdisciplinary research that has been fundamental\
+    \ to technology development at places such as DARPA and ARPA-E. “If they set up\
+    \ an ARPA that is all biology all of the time, like NIH is, then they are going\
+    \ to radically limit its effectiveness,” he says.Others worry that the scope of\
+    \ ARPA-H’s mission is too broad. Health care is a huge field. Given that there\
+    \ is already plenty of private investment in new drugs and medical therapies for\
+    \ prevalent diseases, Goldstein says, ARPA-H might be better placed to have an\
+    \ impact on neglected diseases that affect people living in impoverished and underprivileged\
+    \ communities. This area receives much less funding from other sources. “The trick\
+    \ is setting the scope broad enough so that programme managers can wander intellectually\
+    \ and follow their noses, but not so broad that you try to boil the ocean,” says\
+    \ Eric Toone, a chemist who helped to set up ARPA-E and now works for Breakthrough\
+    \ Energy Ventures, a venture-capital firm based in Kirkland, Washington. This\
+    \ is also a potential concern with Britain’s ARIA, whose scope has yet to be defined,\
+    \ Toone adds.Toone also recommends starting out small and letting new agencies\
+    \ grow over time. “The challenge you have with too much money is people’s expectations\
+    \ wind up in funny places.”"
+  learner_created: true
+- name: ‘Pregnant’_male_rat_study_kindles_bioethical_debate_in_China.txt
+  visible: true
+  text: |-
+    It’s not the first time research in China has led to controversy over ethics.Credit: APA Picturedesk Gmbh/Shutterstock
+
+
+    An experiment to impregnate male rats stitched to female rats, by researchers at the Naval Medical University in Shanghai, has stirred debate in China and beyond about the ethics of the work.Researchers say the experiment was highly contrived and unnecessarily distressing to the animals, and that it offers few insights into the possibility of pregnancy in people assigned male at birth — if anything, the poor success rate suggests that such a goal is a long way off.But other scientists say the rat model could eventually be used to gradually tease apart what might be required to maintain pregnancy in people of any sex who wish to bear children. The study was detailed in a bioRxiv preprint posted online on 10 June1.“The experiment has no social value and just wasted the money taken from taxpayers,” says Qiu Renzong, a bioethicist at the Chinese Academy of Social Science in Beijing.The paper has been particularly hotly debated among scholars and the public in China, where it was recently among the top-trending subjects on the Chinese social-media platform Weibo. Some researchers in China fear that reckless biological experimentation could blemish the country’s reputation.Issues with ethics in ChinaChinese scientists are concerned that controversial research, such as this study, could reinforce an “already tainted image of Chinese science”, says Joy Zhang, a sociologist at the University of Kent in Canterbury, UK, who has conducted research in China over many years. The study is one of several in recent years that Chinese researchers feel have presented a “distorted image” of what they believe China’s research culture should be, she says.In one high-profile case from 2018, a Chinese researcher announced the birth of the first genome-edited babies, which was widely criticized as highly unethical. The incident spurred efforts to strengthen ethical governance in China, including the formation of a national committee to advise the government on research ethics.
+
+    Genome-edited baby claim provokes international outcry
+    “There is also a deeper worry that the undying trend of ‘science through PR’ — the mentality that experiments with outlandish objectives are a shortcut to public attention — would turn science into a form of entertainment business rather than a serious and responsible academic endeavour,” says Zhang.It is not clear whether the pregnancy experiment was approved by an independent ethics committee — a requirement for all publicly funded experiments involving laboratory animals — says Zhang Xinqing, a bioethicist at Peking Union Medical College in Beijing. Zhang adds that if it had been up to him, he would not have voted to approve this experiment. The authors declined to comment on questions about the research from Nature. They stated in their manuscript that the work could have “a profound impact on reproductive biology”, but did not clarify why. In a public statement on PubPeer, a website for post-publication peer review, one of the authors, Zhang Rongjia, said the work was performed “for our personal interests and curiosity”, and that they made efforts to reduce the number of animals used and to minimize their pain.Birth of ten live pupsPregnancy in males is extremely rare in nature, and is observed only in a group of fish that includes seahorses and pipefishes. To study the possibility of achieving it in mammals, the Chinese researchers sewed the elbows, knees and skins of pairs of rats together, each consisting of a castrated male and a female, to join their blood supply. This conjoined model, known as a parabiont, allows the animals to share blood.Parabiosis is an established surgical technique for connecting animals to study the effects of infusing blood from one to the other — for example from an elderly mouse to a youthful one to study the process of ageing.
+
+    The CRISPR-baby scandal: what’s next for human gene-editing
+    Six weeks after the castration and surgery, testosterone levels in the male rats had significantly declined — but their levels of oestrogen and progesterone mirrored those in the female rats.Eight weeks after surgery, the researchers transplanted a uterus into each male rat, followed by embryos into both the male and female after another eight weeks. Three weeks into the embryos’ development, and near the end of a normal rat pregnancy, the researchers delivered the pups by caesarean section.Out of 842 embryos introduced into 46 conjoined pairs of rats, one-third of those in the female rats and one-tenth of those in the male rats developed into viable fetuses. Only 10 pups gestated in the male rats survived to adulthood — some 4% of the 280 embryos implanted in the male rats. The adult rats were subsequently separated, and all the males survived for another three months, until they were eventually euthanized.The authors say the findings point to the importance of the pregnant female’s blood supply, because the embryos did not mature in males that were attached to females without developing fetuses. The importance of the blood supply and the low rate of births suggest that “male pregnancy in humans is not feasible at this stage”, Zhang wrote on PubPeer, adding: “If our result is correct, this is almost a death sentence for human male pregnancy.”Limited scientific insightsBut other researchers say the importance of a mother’s endocrine system is already common knowledge.The study offers limited insights, says Chris O’Neill, a retired researcher formerly based at the University of Sydney in Australia, who has studied the biology of pregnancy. The model is effectively an ex vivo model of female pregnancy, he adds: a female uterus and blood supply within a castrated male. “It tells us that at least within the castrated male, there is no fundamental hostility of the male environment to carrying a fetus,” he says. The intrusive surgical intervention also doesn’t lend itself to being applied to people, says Catherine Mills, a bioethicist at Monash University in Melbourne, Australia. “It is quite a long way from any real implication for human research,” she says. “In a sense, it is not an animal model; it is just an animal experiment.”Study co-author Zhang declined to comment on the criticisms of the value of the work, stating in an e-mail to Nature that the authors “prefer to respond to external criticism by formally publishing academic papers”.
+
+    Reboot ethics governance in China
+    O’Neill says the study might provide a new experimental model for identifying nutrients or hormones in maternal blood that are crucial for a successful pregnancy.There could be implications for other reproductive research in people as well. Some groups are already considering the possibility of uterine transplants in transgender women, says Mats Brännström, a reproductive-health researcher at Gothenburg University in Sweden, who led the first clinical trial of such a transplant in cisgender women without functioning uteri. Animal experiments such as the one by the Chinese researchers could be a first step in establishing the safety of such surgeries, says Brännström — and the findings offer a sense of the great challenge of such a task.But others question whether there is any value to pregnancy in people assigned male at birth at all. “There may be some limited applications where trans women want to be able to gestate a child,” says Mills, but otherwise, “what is the therapeutic need?”
+  learner_created: true
+- name: WHO_should_lead_on_genomeediting_policy_advisers_say.txt
+  visible: true
+  text: |-
+    A human embryo shortly after fertilization, seen in a light micrograph.Credit: K. H. Kjeldsen/SPL
+
+
+    A committee formed in the wake of a scandal has advised the World Health Organization (WHO) to assume a leading, global role in efforts to regulate genome editing. The WHO should help governments to coordinate their country-level regulations, the advisers say, and genome editing should not yet be used to make modifications that can be passed on to later generations.The recommendations, released in two separate reports on 12 July, are the culmination of two years of work by the advisory group. It was formed after biophysicist He Jiankui, formerly at the Southern University of Science and Technology in Shenzhen, China, shocked the world in 2018 by announcing that he had used the CRISPR genome-editing technique to alter embryos that were implanted and led to the birth of two girls.The committee’s mandate was to tackle the thorny issues raised by unchecked genome editing — but without quashing its medical promise. Among its recommendations are to foster international collaboration in the governance of such applications, to encourage appropriate ethical review of clinical trials involving human genome editing and to promote equitable access to medicines that are developed using the technology.The recommendations are not legally binding, but they still have the power to shape deliberations among governments and funding bodies around the world, says Julian Hitchcock, a lawyer at London firm Bristows, who specializes in the regulation of regenerative and reproductive medicine. “They set a standard,” he says. “At that level, I think that they are quite significant.”After He’s 2018 announcement, a host of researchers and scientific organizations called for a moratorium on the use of genome editing to create heritable changes to the human genome. In 2019, WHO advisers recommended the creation of a registry of clinical studies of genome editing in humans, and said it was too soon to proceed with clinical applications of germline genome editing, as He had done. The WHO does not have the power to impose moratoriums on specific research practices, but a number of countries and funding agencies already have moratoriums on germline genetic editing in place.And in September 2020, another committee — convened by the US National Academy of Medicine, the US National Academy of Sciences and the UK Royal Society, and with representatives from ten countries — also concluded that the technology is not yet ready for use in human embryos destined for implantation.The new reports from WHO advisers reiterate their 2019 position against heritable editing at this time, and urge international collaboration in the governance of other applications of the technique. Clinical trials of genome editing have shown promise in treating blood disorders such as sickle cell anaemia, cancer and a deadly genetic disorder called transthyretin amyloidosis.Such applications are not conceptually far from other approaches to gene therapy, such as inserting entire genes into the genome, says Hitchcock. And several countries, including the United Kingdom and United States, already have robust regulations around gene-therapy trials and medicines, he notes.But there are concerns that these applications of genome editing could be too expensive for use in many countries where they’d be most beneficial: sickle-cell anaemia, for example, is particularly prevalent in sub-Saharan Africa. The WHO advisers called for consideration of how intellectual-property rights will affect pricing of genome-editing therapies — an important first step in discussions about equitable access, says Kay Davies, a geneticist at the University of Oxford, UK .WHO advisers also recommended that the United Nations create a working group to evaluate the implications of emerging technologies, including genome editing. Such a committee would be a key endorsement for international collaboration, says Davies. “You can’t dictate to different countries what they should do — there are going to be big cultural differences between them,” she says. “But if we learn from each other, it’s going to be important.”By sidestepping specifics, however, the committee missed an opportunity for greater clarity around key issues, says bioethicist Abha Saxena at the University of Geneva in Switzerland. It was a missed opportunity to make concrete suggestions on governance structure and on issues that affect lower-to-middle-income countries, she says.And the reports urge the WHO to regularly evaluate such technologies as they progress. “I hope that will be reflected in national laws,” says Hitchcock. “There’s a problem if you produce regulations and the science catches up — the regulations get out of date, fast.”
+  learner_created: true
+- name: exercise.py
+  visible: true
+  text: |
+    my_file = open('hyperskill-dataset-40985365.txt', 'r')
+    my_lines = my_file.readlines()
+    counter = 0
+    for line in my_lines:
+        if line == 'summer':
+            counter += 1
+  learner_created: true
+- name: Loss_of_Australia’s_largest_lab_animal_supplier_will_leave_‘huge_gap’.txt
+  visible: true
+  text: "The ARC is the only supplier of some specific strains of rats and mice in\
+    \ Australia.Credit: Salvatore Laporta/KONTROLAB/LightRocket/Getty\n\n\nAustralia’\
+    s biggest supplier of mice and rats for research announced last week that it plans\
+    \ to shut down operations over the next 18 months — a decision that scientists\
+    \ say could have a devastating impact on biomedical research in the country.The\
+    \ imminent closure of the Animal Resources Centre (ARC) “obviously is going to\
+    \ leave a huge gap in the supply of animals to many universities and medical-research\
+    \ institutes”, says Malcolm France, a Sydney-based veterinary consultant and former\
+    \ president of the Australian and New Zealand Laboratory Animal Association.The\
+    \ ARC is a breeding facility in Perth, Western Australia, with an annual revenue\
+    \ of around Aus$8 million (US$5.9 million) and around 60 staff members. In 2020,\
+    \ it sold 199,258 rats and mice. The vast majority went to Australian clients,\
+    \ but it also exports animals to nations including New Zealand, Indonesia and\
+    \ South Korea.However, on 2 July, the ARC e-mailed its customers, delivering the\
+    \ news that supplies would soon be running dry. Operations will wind down over\
+    \ the next 12–18 months, wrapping up completely by December 2022.Not financially\
+    \ viableThe facility is “the only major producer of animals specially for sale”\
+    \ to Australia’s 43 universities, more than 50 medical research institutes, and\
+    \ other government and commercial research organizations, so the “overall reliance\
+    \ on ARC is very high”, and the loss of these animals is likely to be very problematic,\
+    \ says France.The e-mail from acting ARC chief executive Kirsty Moynihan said\
+    \ that the decision to wind down operations was taken because the centre had not\
+    \ been “able to operate in a financially self-sustaining manner” — and it needed\
+    \ to vacate its premises at Perth’s Murdoch University. \n\nLabs rush to study\
+    \ coronavirus in transgenic animals — some are in short supply\nThe ARC is run\
+    \ by a body of the Western Australia (WA) state government, which made the closure\
+    \ decision. In a statement e-mailed to Nature, a spokesperson for the state health\
+    \ minister clarified the reasons. They said the ARC is not financially viable\
+    \ and “the WA government has repeatedly been required to step in and make financial\
+    \ contributions”.The spokesperson added that the ARC was originally intended to\
+    \ supply laboratory animals as models of disease to research institutions in Western\
+    \ Australia, but currently only about 16% of animals sold remain in the state;\
+    \ “the majority of the animal stock sold is supplied to interstate and overseas\
+    \ markets for medical research at a loss — effectively being subsidized by WA\
+    \ taxpayers”.A catalyst for the decision was the fact that the centre’s lease\
+    \ at Murdoch University is due to expire in 2023, and “the cost of setting up\
+    \ a new purpose-built facility for research-animal breeding is not seen as commercially\
+    \ viable”.Shattering newsBut this justification ignores the impact that the centre’\
+    s closure will have on institutions in Western Australia, and “shows no inclination\
+    \ to work with the federal government or other stakeholders to come up with a\
+    \ plan”, says France.Kirsty Short, a virologist at the University of Queensland\
+    \ in Brisbane, says the news was shattering and she initially didn’t believe the\
+    \ e-mail was real. “I just didn’t see how that was possible,” says Short. She\
+    \ relies on the ARC as the sole supplier of animal models for her research into\
+    \ the effects of diabetes and obesity on the immune response to viral infection.Until\
+    \ an alternative source of these animals is found, many researchers might have\
+    \ to halt experiments, she says. “We are all worried about that.”Researchers at\
+    \ the University of Sydney are also very concerned, says deputy vice-chancellor\
+    \ for research Duncan Ivison. The closure “will have major implications for Australia’\
+    s medical-research effort, given that animal models are critical to our understanding\
+    \ of disease processes and to the development of new medical interventions”, he\
+    \ adds. Michelle Haber, executive director of the Children’s Cancer Institute\
+    \ in Sydney, says the ARC accounts for 80% of the animals her institution orders,\
+    \ including one strain of mice not available from any other supplier in Australia.\
+    \ The closure could have a significant impact on the institute’s research programmes\
+    \ and ability to develop new treatments for children with cancer, she says.Difficult\
+    \ problemThe problem will not be easy to fix, say researchers, because other breeding\
+    \ centres will find it hard to scale up in time to fill the gap. One option is\
+    \ to import animals, which would be expensive, difficult owing to quarantine rules,\
+    \ and stressful for the animals.\n\nSqueaky clean mice could be ruining research\n\
+    Individual universities could extend their own breeding programmes, and expand\
+    \ to maintain highly specialized animal lines, but many have limited space to\
+    \ house the animals, say researchers. “The question is, who is going to bear the\
+    \ burden of that cost and how feasible is that?” says Short. The ARC’s high quality-control\
+    \ standards will also be “difficult to replicate across many universities”, adds\
+    \ France. Ivison says the University of Sydney has in recent weeks joined other\
+    \ research-intensive universities to try to find a solution, but that might not\
+    \ materialize before the centre closes, “which will leave researchers scrambling\
+    \ for alternatives”.For now, scientists have been left reeling. “There are just\
+    \ so many questions that have to be answered,” says Short. But she and others\
+    \ hope another supplier will step in to fill the vacuum. “We must come up with\
+    \ a solution nationally,” says Haber."
+  learner_created: true
+- name: Climate_change_made_North_America’s_deadly_heatwave_150_times_more_likely.txt
+  visible: true
+  text: |-
+    Wildfire burns near the Canadian village of Lytton.Credit: James MacDonald/Bloomberg via Getty
+
+
+    The devastating heatwave that struck parts of Canada and the United States late last month would have been extremely unlikely without global warming, researchers have concluded. The chance of temperatures in the Pacific Northwest region coming close to 50 °C has increased at least 150-fold since the end of the nineteenth century, found a rapid analysis conducted in response to the heatwave. “This heatwave would have been virtually impossible without the influence of human-caused climate change,” says Sjoukje Philip, a climate scientist at the Royal Netherlands Meteorological Institute (KNMI) in De Bilt and a co-author of the analysis. “It was probably still a rare event, but if global warming might exceed two degrees, it might occur every five to ten years in the future.” The record-breaking heatwave lasted from 25 June to 1 July, and affected large cities that rarely experience extreme heat, including Portland, Oregon; Seattle, Washington; and Vancouver, Canada. More than 500 excess deaths and 180 wildfires were recorded in the western Canadian province of British Columbia. The region’s peak temperature of 49.6 °C, recorded on 29 June in the village of Lytton, was the highest ever reported in Canada. Lytton’s inhabitants were evacuated before a devastating blaze almost completely destroyed the village.A group of 27 scientists with the World Weather Attribution (WWA) project rushed to analyse whether global warming had influenced the likelihood of such an intense heatwave occurring in the region. Their analysis reveals an unambiguous footprint of human-caused climate change. The team compared the observed heat with maximum daily temperatures predicted by climate models, including simulations of temperatures in an atmosphere unaltered by the effect of rising greenhouse-gas concentrations. They concluded that the global average temperature increase of 1.2 °C since pre-industrial times made the extreme heatwave at least 150 times more likely to happen.Unusual conditionsThe analysis was more challenging than similar studies, including those on heatwaves in the past few years in western Europe and Russia, says co-author Geert Jan van Oldenborgh, a climate modeller at the KNMI. The peak temperatures observed were up to 5 °C higher than previous records in the region. These extremes made it hard to pin down precisely how rare a heatwave of such strength might have been in cooler periods of the past, and how often it might be expected to occur in the current climate, he says. The severity of the heatwave could have been partly due to the effects of earlier drought and unusual atmospheric circulation conditions, says van Oldenborgh. It is also possible — although unproven — that climate change is causing local heat extremes to become more frequent and intense than they would be in a cooler climate. If that is the case, record-breaking heatwaves might already be more likely to happen than existing climate models predict, says WWA co-lead Friederike Otto, a climate researcher at the University of Oxford, UK.“Here’s a strong warning that we have to study heatwaves more,” she adds. “Climate change is an absolute game changer for extreme events — and models might not be a good indicator of what might still come in a warming world.”Global warming means that heat anomalies do naturally increase by a large factor, says James Hanson, a climate scientist at Columbia University in New York. “Compared to what was ‘normal’ in the 20th century, the bell curve for climate anomalies is not only shifted to higher temperatures, it becomes asymmetric with a long tail on the hot side,” he says.City planners and emergency workers worldwide need to prepare more effectively for the impacts of more frequent heatwaves on human health, agriculture and infrastructure, says co-author Maarten van Aalst, director of the Red Cross Red Crescent Climate Centre in The Hague, the Netherlands. “Heatwaves are topping global disaster death charts, although we are probably missing many cases,” he says. “Clearly, local heatwave plans need to be ready for more extreme conditions than in the past.”
+  learner_created: true
+feedback_link: https://hyperskill.org/projects/145/stages/785/implement#comment
+status: Solved
+feedback:
+  message: Well done! You've finished the project. Select a new project on <a href="https://hyperskill.org/projects">JetBrains
+    Academy</a> to continue learning.
+  time: Wed, 14 Jul 2021 09:23:14 UTC
+record: -1
